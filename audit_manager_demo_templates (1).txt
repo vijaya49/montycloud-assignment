@@ -1,0 +1,750 @@
+# Complete CloudFormation Template for AWS Audit Manager Setup
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete AWS Audit Manager Setup - Replace all placeholder values before deployment'
+
+Parameters:
+  CompanyName:
+    Type: String
+    Default: "MyCompany"  # REPLACE WITH YOUR COMPANY NAME
+    Description: "Company name for resource naming"
+  
+  NotificationEmail:
+    Type: String
+    Description: "Email for compliance notifications"
+    Default: "admin@mycompany.com"  # REPLACE WITH YOUR EMAIL
+  
+  EnvironmentName:
+    Type: String
+    Default: "prod"  # REPLACE: prod, dev, staging, etc.
+    Description: "Environment name"
+
+Resources:
+  # =============================================================================
+  # S3 BUCKETS FOR EVIDENCE AND REPORTS
+  # =============================================================================
+  
+  AuditEvidenceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${CompanyName}-audit-evidence-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: EvidenceRetention
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+              - TransitionInDays: 365
+                StorageClass: DEEP_ARCHIVE
+      VersioningConfiguration:
+        Status: Enabled
+
+  AuditReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${CompanyName}-audit-reports-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ConfigBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${CompanyName}-aws-config-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${CompanyName}-cloudtrail-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # =============================================================================
+  # S3 BUCKET POLICIES
+  # =============================================================================
+  
+  ConfigBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ConfigBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSConfigBucketPermissionsCheck
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt ConfigBucket.Arn
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+          - Sid: AWSConfigBucketExistenceCheck
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:ListBucket
+            Resource: !GetAtt ConfigBucket.Arn
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+          - Sid: AWSConfigBucketDelivery
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${ConfigBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': bucket-owner-full-control
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${CloudTrailBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': bucket-owner-full-control
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+  # =============================================================================
+  # SNS TOPIC FOR NOTIFICATIONS
+  # =============================================================================
+  
+  AuditNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${CompanyName}-audit-notifications"
+      DisplayName: "Audit Manager Notifications"
+      KmsMasterKeyId: alias/aws/sns
+
+  AuditNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AuditNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # =============================================================================
+  # IAM ROLES
+  # =============================================================================
+  
+  # AWS Config Service Role
+  ConfigServiceRole:
+    Type: AWS::IAM::ServiceLinkedRole
+    Properties:
+      AWSServiceName: config.amazonaws.com
+      Description: "Service linked role for AWS Config"
+
+  # CloudTrail Service Role (if needed)
+  CloudTrailRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${CompanyName}-CloudTrailRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  # Audit Manager Service Role
+  AuditManagerServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${CompanyName}-AuditManagerServiceRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: auditmanager.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AuditManagerServiceRolePolicy
+      Policies:
+        - PolicyName: EvidenceStorageAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "${AuditEvidenceBucket.Arn}/*"
+                  - !GetAtt AuditEvidenceBucket.Arn
+                  - !Sub "${AuditReportsBucket.Arn}/*"
+                  - !GetAtt AuditReportsBucket.Arn
+
+  # Lambda Execution Role for Evidence Processing
+  EvidenceProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${CompanyName}-EvidenceProcessorRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AuditManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - auditmanager:*
+                  - config:Get*
+                  - config:List*
+                  - config:Describe*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AuditNotificationTopic
+
+  # Remediation Lambda Role
+  RemediationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${CompanyName}-RemediationLambdaRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RemediationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:RevokeSecurityGroupIngress
+                  - s3:PutPublicAccessBlock
+                  - s3:GetPublicAccessBlock
+                  - sns:Publish
+                Resource: '*'
+
+  # Audit Process Owner Role
+  AuditProcessOwnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${CompanyName}-AuditProcessOwner"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"  # REPLACE WITH SPECIFIC USER ARN
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AuditProcessOwnerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - auditmanager:GetAssessment
+                  - auditmanager:UpdateAssessment
+                  - auditmanager:GetEvidence*
+                  - auditmanager:CreateDelegation
+                Resource: '*'
+
+  # =============================================================================
+  # AWS CONFIG SETUP
+  # =============================================================================
+  
+  ConfigurationRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties:
+      Name: !Sub "${CompanyName}-config-recorder"
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig"
+      RecordingGroup:
+        AllSupportedResourceTypes: true
+        IncludeGlobalResourceTypes: true
+        RecordingModeOverrides: []
+    DependsOn: ConfigServiceRole
+
+  DeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    Properties:
+      Name: !Sub "${CompanyName}-delivery-channel"
+      S3BucketName: !Ref ConfigBucket
+      ConfigSnapshotDeliveryProperties:
+        DeliveryFrequency: Daily
+    DependsOn: ConfigBucketPolicy
+
+  # =============================================================================
+  # AWS CONFIG RULES
+  # =============================================================================
+  
+  MFAEnabledRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: mfa-enabled-for-iam-console-access
+      Description: "Checks whether AWS Multi-Factor Authentication is enabled for all IAM users"
+      Source:
+        Owner: AWS
+        SourceIdentifier: MFA_ENABLED_FOR_IAM_CONSOLE_ACCESS
+    DependsOn: ConfigurationRecorder
+
+  S3BucketPublicAccessRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: s3-bucket-public-access-prohibited
+      Description: "Checks that Amazon S3 buckets do not allow public access"
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_ACCESS_PROHIBITED
+    DependsOn: ConfigurationRecorder
+
+  SecurityGroupSSHRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: incoming-ssh-disabled
+      Description: "Checks whether security groups disallow unrestricted incoming SSH traffic"
+      Source:
+        Owner: AWS
+        SourceIdentifier: INCOMING_SSH_DISABLED
+    DependsOn: ConfigurationRecorder
+
+  RootUserMFARule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: root-mfa-enabled
+      Description: "Checks whether MFA is enabled for the root user"
+      Source:
+        Owner: AWS
+        SourceIdentifier: ROOT_MFA_ENABLED
+    DependsOn: ConfigurationRecorder
+
+  # =============================================================================
+  # CLOUDTRAIL SETUP
+  # =============================================================================
+  
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: !Sub "${CompanyName}-audit-trail"
+      S3BucketName: !Ref CloudTrailBucket
+      IncludeGlobalServiceEvents: true
+      IsMultiRegionTrail: true
+      EnableLogFileValidation: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources:
+            - Type: "AWS::S3::Object"
+              Values: ["arn:aws:s3:::*/*"]
+    DependsOn: CloudTrailBucketPolicy
+
+  # =============================================================================
+  # LAMBDA FUNCTIONS
+  # =============================================================================
+  
+  EvidenceProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${CompanyName}-evidence-processor"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt EvidenceProcessorRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          ASSESSMENT_ID: "REPLACE_WITH_ASSESSMENT_ID"  # REPLACE AFTER CREATING ASSESSMENT
+          SNS_TOPIC_ARN: !Ref AuditNotificationTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+              
+              audit_manager = boto3.client('auditmanager')
+              
+              # Extract Config compliance change information
+              try:
+                  detail = event['detail']
+                  resource_id = detail.get('resourceId')
+                  resource_type = detail.get('resourceType')
+                  compliance_type = detail.get('newEvaluationResult', {}).get('complianceType')
+                  config_rule_name = detail.get('configRuleName')
+                  
+                  print(f"Processing compliance change for {resource_type} {resource_id}: {compliance_type}")
+                  
+                  # Create evidence record (if assessment ID is configured)
+                  assessment_id = os.environ.get('ASSESSMENT_ID')
+                  if assessment_id and assessment_id != 'REPLACE_WITH_ASSESSMENT_ID':
+                      evidence_data = {
+                          'resourceId': resource_id,
+                          'resourceType': resource_type,
+                          'complianceType': compliance_type,
+                          'configRuleName': config_rule_name,
+                          'timestamp': datetime.utcnow().isoformat(),
+                          'evaluationResult': detail.get('newEvaluationResult', {})
+                      }
+                      
+                      print(f"Evidence data prepared: {json.dumps(evidence_data)}")
+                  
+                  # Send notification for non-compliant resources
+                  if compliance_type == 'NON_COMPLIANT':
+                      send_notification(resource_id, resource_type, config_rule_name)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Evidence processing completed successfully')
+                  }
+                  
+              except Exception as e:
+                  print(f"Error processing evidence: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+          
+          def send_notification(resource_id, resource_type, rule_name):
+              sns = boto3.client('sns')
+              topic_arn = os.environ.get('SNS_TOPIC_ARN')
+              
+              if topic_arn:
+                  message = f"""
+                  Compliance Violation Detected
+                  
+                  Resource ID: {resource_id}
+                  Resource Type: {resource_type}
+                  Rule: {rule_name}
+                  Status: NON_COMPLIANT
+                  
+                  Please investigate and remediate this compliance violation.
+                  """
+                  
+                  sns.publish(
+                      TopicArn=topic_arn,
+                      Subject=f'Compliance Violation: {rule_name}',
+                      Message=message
+                  )
+
+  RemediationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${CompanyName}-auto-remediation"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt RemediationLambdaRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref AuditNotificationTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          def lambda_handler(event, context):
+              print(f"Received remediation event: {json.dumps(event)}")
+              
+              try:
+                  detail = event['detail']
+                  resource_id = detail.get('resourceId')
+                  resource_type = detail.get('resourceType')
+                  config_rule_name = detail.get('configRuleName')
+                  
+                  remediation_result = {
+                      'resource_id': resource_id,
+                      'resource_type': resource_type,
+                      'rule_name': config_rule_name,
+                      'remediation_action': 'None',
+                      'status': 'No Action'
+                  }
+                  
+                  # Only remediate specific violations
+                  if config_rule_name == 'incoming-ssh-disabled' and resource_type == 'AWS::EC2::SecurityGroup':
+                      result = remediate_open_ssh_sg(resource_id)
+                      remediation_result.update(result)
+                  
+                  elif config_rule_name == 's3-bucket-public-access-prohibited' and resource_type == 'AWS::S3::Bucket':
+                      result = remediate_public_s3_bucket(resource_id)
+                      remediation_result.update(result)
+                  
+                  print(f"Remediation result: {json.dumps(remediation_result)}")
+                  
+                  # Send notification about remediation action
+                  send_remediation_notification(remediation_result)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(remediation_result)
+                  }
+                  
+              except Exception as e:
+                  print(f"Error in remediation: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+          
+          def remediate_open_ssh_sg(security_group_id):
+              ec2 = boto3.client('ec2')
+              try:
+                  response = ec2.describe_security_groups(GroupIds=[security_group_id])
+                  sg = response['SecurityGroups'][0]
+                  
+                  for rule in sg['IpPermissions']:
+                      if rule.get('FromPort') == 22 and rule.get('ToPort') == 22:
+                          for ip_range in rule.get('IpRanges', []):
+                              if ip_range.get('CidrIp') == '0.0.0.0/0':
+                                  ec2.revoke_security_group_ingress(
+                                      GroupId=security_group_id,
+                                      IpPermissions=[{
+                                          'IpProtocol': rule['IpProtocol'],
+                                          'FromPort': 22,
+                                          'ToPort': 22,
+                                          'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+                                      }]
+                                  )
+                  
+                  return {
+                      'remediation_action': 'Revoked open SSH access (0.0.0.0/0)',
+                      'status': 'Success'
+                  }
+              except Exception as e:
+                  return {
+                      'remediation_action': 'Remove open SSH access',
+                      'status': 'Failed',
+                      'error': str(e)
+                  }
+          
+          def remediate_public_s3_bucket(bucket_name):
+              s3 = boto3.client('s3')
+              try:
+                  s3.put_public_access_block(
+                      Bucket=bucket_name,
+                      PublicAccessBlockConfiguration={
+                          'BlockPublicAcls': True,
+                          'IgnorePublicAcls': True,
+                          'BlockPublicPolicy': True,
+                          'RestrictPublicBuckets': True
+                      }
+                  )
+                  
+                  return {
+                      'remediation_action': 'Applied public access block',
+                      'status': 'Success'
+                  }
+              except Exception as e:
+                  return {
+                      'remediation_action': 'Block public access',
+                      'status': 'Failed',
+                      'error': str(e)
+                  }
+          
+          def send_remediation_notification(result):
+              sns = boto3.client('sns')
+              topic_arn = os.environ.get('SNS_TOPIC_ARN')
+              
+              if topic_arn and result.get('status') != 'No Action':
+                  message = f"""
+                  Automated Remediation Report
+                  
+                  Resource ID: {result.get('resource_id')}
+                  Resource Type: {result.get('resource_type')}
+                  Rule: {result.get('rule_name')}
+                  Action: {result.get('remediation_action')}
+                  Status: {result.get('status')}
+                  
+                  {"Error: " + result.get('error', '') if result.get('error') else "Remediation completed successfully."}
+                  """
+                  
+                  sns.publish(
+                      TopicArn=topic_arn,
+                      Subject=f'Auto-Remediation: {result.get("status")}',
+                      Message=message
+                  )
+
+  # =============================================================================
+  # EVENTBRIDGE RULES
+  # =============================================================================
+  
+  ConfigComplianceChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${CompanyName}-config-compliance-changes"
+      Description: "Trigger evidence collection on Config compliance changes"
+      EventPattern:
+        source: ["aws.config"]
+        detail-type: ["Config Rules Compliance Change"]
+        detail:
+          messageType: ["ComplianceChangeNotification"]
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EvidenceProcessorFunction.Arn
+          Id: "EvidenceProcessorTarget"
+        - Arn: !GetAtt RemediationFunction.Arn
+          Id: "RemediationTarget"
+
+  # Lambda permissions for EventBridge
+  EvidenceProcessorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EvidenceProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConfigComplianceChangeRule.Arn
+
+  RemediationFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RemediationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConfigComplianceChangeRule.Arn
+
+# =============================================================================
+# OUTPUTS - IMPORTANT VALUES YOU'LL NEED
+# =============================================================================
+
+Outputs:
+  AuditManagerServiceRoleArn:
+    Description: "ARN of the Audit Manager Service Role - USE THIS IN AUDIT MANAGER SETUP"
+    Value: !GetAtt AuditManagerServiceRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AuditManagerServiceRoleArn"
+
+  AuditEvidenceBucketName:
+    Description: "S3 bucket for audit evidence - USE THIS IN AUDIT MANAGER SETUP"
+    Value: !Ref AuditEvidenceBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-AuditEvidenceBucket"
+
+  AuditReportsBucketName:
+    Description: "S3 bucket for audit reports - USE THIS IN AUDIT MANAGER SETUP"
+    Value: !Ref AuditReportsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-AuditReportsBucket"
+
+  AuditProcessOwnerRoleArn:
+    Description: "ARN of Audit Process Owner Role - USE THIS WHEN CREATING ASSESSMENTS"
+    Value: !GetAtt AuditProcessOwnerRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AuditProcessOwnerRoleArn"
+
+  NotificationTopicArn:
+    Description: "SNS Topic for audit notifications"
+    Value: !Ref AuditNotificationTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-NotificationTopicArn"
+
+  ConfigBucketName:
+    Description: "AWS Config bucket name"
+    Value: !Ref ConfigBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-ConfigBucket"
+
+  CloudTrailName:
+    Description: "CloudTrail name for audit logging"
+    Value: !Ref CloudTrail
+    Export:
+      Name: !Sub "${AWS::StackName}-CloudTrail"
+
+  EvidenceProcessorFunctionName:
+    Description: "Lambda function for evidence processing - UPDATE ASSESSMENT_ID ENV VAR"
+    Value: !Ref EvidenceProcessorFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-EvidenceProcessor"
+
+  # PLACEHOLDER VALUES TO REPLACE AFTER STACK CREATION
+  NextSteps:
+    Description: "IMPORTANT: After stack creation, replace these placeholder values"
+    Value: |
+      1. Go to AWS Audit Manager console and enable the service using the ServiceRole ARN from outputs
+      2. Create your first assessment and note the Assessment ID
+      3. Update the Lambda function environment variable ASSESSMENT_ID with the real assessment ID
+      4. Replace the trust policy in AuditProcessOwnerRole with specific user ARNs
+      5. Test the setup by creating a compliance violation (open security group)
+
+# =============================================================================
+# VALUES YOU MUST REPLACE BEFORE DEPLOYMENT:
+# 
+# 1. CompanyName parameter: Change "MyCompany" to your company name
+# 2. NotificationEmail parameter: Change to your actual email
+# 3. EnvironmentName parameter: Change to your environment (prod/dev/staging)
+# 
+# VALUES TO REPLACE AFTER DEPLOYMENT:
+# 
+# 1. In Lambda function environment: ASSESSMENT_ID (after creating assessment)
+# 2. In AuditProcessOwnerRole trust policy: Replace root with specific user ARNs
+# 
+# =============================================================================
